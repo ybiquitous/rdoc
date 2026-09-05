@@ -20,6 +20,7 @@ Examples (output omitted):
 ```sh
 $ ri Hash             # Document for class Hash.
 $ ri Array#sort       # Document for instance method sort in class Array.
+$ ri Float::INFINITY  # Document for constant INFINITY in class Float.
 $ ri read             # Documents for methods ::read and #read in all classes and modules.
 $ ri ruby:dig_methods # Document for page dig_methods.
 ```
@@ -88,6 +89,7 @@ a document, multiple documents, or other information:
     ```sh
     $ ri File
     $ ri IO#readlines
+    $ ri Float#INFINITY
     $ ri ruby:
     ```
 
@@ -101,6 +103,7 @@ a document, multiple documents, or other information:
     Enter a blank line to exit.
     >> File
     >> IO#readlines
+    >> Float#INFINITY
     >> ruby:
     ```
 
@@ -138,6 +141,19 @@ These example `ri` commands cite names for method documents
 | `ri .readlines`, `ri readlines`         | Documents for all class methods `::readlines` and all instance methods `#readlines`. |
 | `ri Nokogiri::HTML4::Document::parse`   | Document for gem class method `Nokogiri::HTML4::Document::parse`.                    |
 | `ri Nokogiri::HTML4::Document#fragment` | Document for gem instance method `Nokogiri::HTML4::Document#fragment`.               |
+<br>
+
+### Names for Constant Documents
+
+These example `ri` commands cite names for constant documents
+(see [details and examples][21]):
+
+| Command              | Shows                                                                    |
+|----------------------|--------------------------------------------------------------------------|
+| `ri Float::INFINITY`   | Document for Ruby constant `Float::INFINITY`.                          |
+| `ri Object::ARGV`      | Document for Ruby top-level constant `ARGV`.                           |
+| `ri Zl::ZLIB_VERSION`  | Document for Ruby constant `Zlib::ZLIB_VERSION` (`Zl` is abbreviated). |
+| `ri Nokogiri::VERSION` | Document for gem constant `Nokogiri::VERSION`.                         |
 <br>
 
 ### Names for Page Documents
@@ -264,7 +280,7 @@ When you see:
 ## `ri` Documents
 
 This section outlines what you can expect to find
-in the `ri` document for a class, module, method, or page.
+in the `ri` document for a class, module, method, constant, or page.
 
 See also:
 
@@ -428,6 +444,65 @@ the number of such implementations depends on the _name_:
     === Implementation from StringIO
     === Implementation from GzipReader
     ```
+
+### Constant Documents
+
+The document for a constant shows:
+
+- The full name of the constant:
+  the class or module that actually defines it, plus the constant name.
+- The source of the constant: `'(from ruby core)'` or `'(from gem <gem>)'`.
+- The class or module that the constant is an alias for
+  (if it is an alias).
+- The text of its embedded documentation (if it exists).
+
+Examples:
+
+```sh
+$ ri Float::INFINITY
+= Float::INFINITY
+
+(from ruby core)
+------------------------------------------------------------------------
+An expression representing positive infinity.
+```
+
+```sh
+$ ri Nokogiri::VERSION
+= Nokogiri::VERSION
+
+(from gem nokogiri-1.16.2-x86_64-linux)
+------------------------------------------------------------------------
+The version of Nokogiri you are using
+```
+
+A constant name must always include the class or module that owns it.
+For example, a top-level constant belongs to `Object`,
+so the `ENV` constant (not the `ENV` class) is written `ri Object::ENV` instead of `ri ENV`.
+
+```sh
+$ ri Object::ENV | head -1
+= Object::ENV
+```
+
+```sh
+$ ri ENV | head -1
+= ENV < Object
+```
+
+A constant differs from the name you typed if the constant is inherited.
+For example, `BasicSocket::SEEK_SET` and `IO::SEEK_SET`:
+
+```sh
+$ ri BasicSocket::SEEK_SET | head -1
+= IO::SEEK_SET
+```
+
+```sh
+$ ri IO::SEEK_SET | head -1
+= IO::SEEK_SET
+```
+
 
 ### Page Documents
 
@@ -840,3 +915,4 @@ see [option `--doc-dir`][20].
 [18]: rdoc-ref:RI.md@ri+at+the+Ready
 [19]: rdoc-ref:RI.md@Output+Filters
 [20]: rdoc-ref:RI.md@Options+--doc-dir-3DDIRPATH-2C+-d+DIRPATH
+[21]: rdoc-ref:RI.md@Constant+Documents

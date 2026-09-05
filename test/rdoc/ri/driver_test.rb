@@ -529,6 +529,12 @@ class RDocRIDriverTest < RDoc::TestCase
     expected.push doc
 
     expected << @RM::Rule.new(1)
+    expected << @RM::Heading.new(1, 'Constants:')
+    expected << @RM::BlankLine.new
+    list = @RM::List.new :NOTE
+    list.items << @RM::ListItem.new('CONST', @RM::Paragraph.new('a constant'))
+    expected << list
+    expected << @RM::BlankLine.new
     expected << @RM::Heading.new(1, 'Instance methods:')
     expected << @RM::BlankLine.new
     expected << @RM::Verbatim.new('inherit')
@@ -740,6 +746,124 @@ class RDocRIDriverTest < RDoc::TestCase
 
       assert_empty out, name
     end
+  end
+
+  def test_display_constant
+    util_store
+
+    out, = capture_output do
+      @driver.display_constant 'Foo::CONST'
+    end
+
+    assert_match %r%^= Foo::CONST%, out
+    assert_match %r%^\(from%, out
+    assert_match %r%a constant%, out
+  end
+
+  def test_display_constant_not_found
+    util_store
+
+    refute @driver.display_constant 'Foo::NO_SUCH_CONST'
+  end
+
+  def test_display_constant_in_ancestor
+    util_multi_store
+
+    out, = capture_output do
+      assert_equal true, @driver.display_name('Bar::CONST')
+    end
+
+    # CONST is defined on Foo, which Bar inherits from.
+    assert_match %r%^= Foo::CONST%, out
+    assert_match %r%a constant%, out
+  end
+
+  def test_display_constant_non_ascii
+    util_store
+
+    # Ruby decides constant-ness by Unicode case.
+    %w[CONSTÉ Éclair].each do |name|
+      const = @cFoo.add_constant RDoc::Constant.new(name, '1', RDoc::Comment.new('a constant', @top_level))
+      const.record_location @top_level
+    end
+    @store1.save_class @cFoo
+
+    %w[CONSTÉ Éclair].each do |name|
+      assert_equal "Foo::#{name}", @driver.expand_name("Foo::#{name}")
+
+      out, = capture_output do
+        assert_equal true, @driver.display_name("Foo::#{name}")
+      end
+
+      assert_match %r%^= Foo::#{name}%, out
+    end
+
+    refute @driver.display_constant 'Foo::定数'
+  end
+
+  def test_display_constant_nearest_ancestor_wins
+    util_ancestor_constants_store
+
+    out, = capture_output do
+      assert_equal true, @driver.display_name('Leaf::V')
+    end
+
+    # Object, Base and Mid all define V.  Ruby resolves Leaf::V to Mid::V.
+    assert_match %r%^= Mid::V%, out
+    assert_match %r%from Mid%, out
+  end
+
+  def test_display_constant_skips_object
+    util_ancestor_constants_store
+
+    # Ruby does not find a top-level constant through a subclass of Object.
+    assert_empty @driver.find_constants('Leaf', 'TOP_LEVEL')
+
+    # ... but Object itself still finds it.
+    assert_equal 'Object::TOP_LEVEL',
+                 @driver.find_constants('Object', 'TOP_LEVEL').first.last.full_name
+  end
+
+  def test_display_constant_alias
+    util_store
+
+    const = @cFoo.add_constant RDoc::Constant.new('ALIAS', 'Foo::Baz', nil)
+    const.is_alias_for = 'Foo::Baz'
+    const.record_location @top_level
+    @store1.save_class @cFoo
+
+    out, = capture_output do
+      assert_equal true, @driver.display_name('Foo::ALIAS')
+    end
+
+    assert_match %r%^= Foo::ALIAS%, out
+    assert_match %r%Alias for Foo::Baz%, out
+  end
+
+  def test_display_constant_multiple_stores
+    util_multi_store
+
+    const = @cFoo.add_constant RDoc::Constant.new('CONST', '1', RDoc::Comment.new('another constant', @top_level))
+    const.record_location @top_level
+    @store2.save_class @cFoo
+
+    out, = capture_output do
+      assert_equal true, @driver.display_name('Foo::CONST')
+    end
+
+    assert_match %r%^= Foo::CONST%, out
+    assert_match %r%a constant%, out
+    assert_match %r%another constant%, out
+  end
+
+  def test_display_name_constant
+    util_store
+
+    out, = capture_output do
+      assert_equal true, @driver.display_name('Foo::CONST')
+    end
+
+    assert_match %r%^= Foo::CONST%, out
   end
 
   def test_display_method
@@ -1031,12 +1155,37 @@ Foo::Bar#bother
     assert_equal '.b',        @driver.expand_name('b')
     assert_equal 'Foo',       @driver.expand_name('F')
     assert_equal 'Foo::Bar#', @driver.expand_name('F::Bar#')
+    assert_equal 'Foo::CONST', @driver.expand_name('Foo::CONST')
 
     e = assert_raise RDoc::RI::Driver::NotFoundError do
       @driver.expand_name 'Z'
     end
 
     assert_equal 'Z', e.name
+
+    assert_raise RDoc::RI::Driver::NotFoundError do
+      @driver.expand_name 'Foo::Ba'
+    end
+
+    e = assert_raise RDoc::RI::Driver::NotFoundError do
+      @driver.expand_name 'Nonexistent::Bar'
+    end
+
+    assert_equal 'Nonexistent::Bar', e.name
+
+    e = assert_raise RDoc::RI::Driver::NotFoundError do
+      @driver.expand_name 'Foo::NO_SUCH_CONST'
+    end
+
+    assert_equal 'Foo::NO_SUCH_CONST', e.name
+
+    # Suggestions are constants of Foo, not classes.
+    e = assert_raise RDoc::RI::Driver::NotFoundError do
+      @driver.expand_name 'Foo::CONSt'
+    end
+
+    assert_equal 'Foo::CONSt', e.name
+    assert_include e.message, 'Foo::CONST' if @driver.check_did_you_mean
 
     @driver.stores << RDoc::Store.new(@rdoc_options, type: :system)
 
@@ -1048,6 +1197,21 @@ Foo::Bar#bother
     end
 
     assert_equal 'nonexistent_gem', e.name
+  end
+
+  def test_expand_name_ambiguous_class_abbreviation
+    util_store
+
+    # "Ba" abbreviates both Foo::Bar and Foo::Baz, so the constant must not win.
+    const = @cFoo.add_constant RDoc::Constant.new('Ba', '1', nil)
+    const.record_location @top_level
+    @store1.save_class @cFoo
+
+    e = assert_raise RDoc::RI::Driver::NotFoundError do
+      @driver.expand_name 'Foo::Ba'
+    end
+
+    assert_equal 'Foo::Ba', e.name
   end
 
   def test_find_methods
@@ -1540,6 +1704,34 @@ Foo::Bar#bother
     @driver.stores = store1, store2
   end
 
+  # Object -> Base -> Mid -> Leaf, with V defined on Object, Base and Mid.
+  def util_ancestor_constants_store
+    util_store
+
+    object = @top_level.add_class RDoc::NormalClass, 'Object'
+    object.record_location @top_level
+    %w[V TOP_LEVEL].each do |name|
+      const = object.add_constant RDoc::Constant.new(name, '0', RDoc::Comment.new('from Object', @top_level))
+      const.record_location @top_level
+    end
+
+    base = @top_level.add_class RDoc::NormalClass, 'Base'
+    base.record_location @top_level
+    const = base.add_constant RDoc::Constant.new('V', '1', RDoc::Comment.new('from Base', @top_level))
+    const.record_location @top_level
+
+    mid = @top_level.add_class RDoc::NormalClass, 'Mid', 'Base'
+    mid.record_location @top_level
+    const = mid.add_constant RDoc::Constant.new('V', '2', RDoc::Comment.new('from Mid', @top_level))
+    const.record_location @top_level
+
+    leaf = @top_level.add_class RDoc::NormalClass, 'Leaf', 'Mid'
+    leaf.record_location @top_level
+
+    @store1.save
+    @driver.stores = [@store1]
+  end
+
   def util_multi_store
     util_store
 
@@ -1614,6 +1806,9 @@ Foo::Bar#bother
 
     @cFoo_Baz = @cFoo.add_class RDoc::NormalClass, 'Baz'
     @cFoo_Baz.record_location @top_level
+
+    @const = @cFoo.add_constant RDoc::Constant.new('CONST', '1', RDoc::Comment.new('a constant', @top_level))
+    @const.record_location @top_level
 
     @inherit = @cFoo.add_method RDoc::AnyMethod.new('inherit')
     @inherit.record_location @top_level

@@ -127,6 +127,8 @@ Where name can be:
 
   Class::method | Class#method | Class.method | method
 
+  Class::CONSTANT | Module::CONSTANT
+
   gem_name: | gem_name:README | gem_name:History
 
   ruby: | ruby:NEWS | ruby:globals
@@ -404,6 +406,7 @@ or the PAGER environment variable.
       def initialize(initial_options = {})
         @paging = false
         @classes = nil
+        @constants = {}
 
         options = self.class.default_options.update(initial_options)
 
@@ -847,7 +850,96 @@ or the PAGER environment variable.
       end
 
       ##
-      # Outputs formatted RI data for the class or method +name+.
+      # Outputs formatted RI data for a constant +name+, such as +Object::ARGV+.
+
+      def display_constant(name)
+        class_name, const_name = split_constant_reference name
+
+        return unless class_name
+
+        found = find_constants class_name, const_name
+
+        return if found.empty?
+
+        out = Markup::Document.new
+
+        # All the pairs describe the same constant, so any of them names it.
+        out << Markup::Heading.new(1, found.first.last.full_name)
+        out << Markup::BlankLine.new
+
+        found.each do |store, constant|
+          render_constant out, store, constant
+        end
+
+        display out
+      end
+
+      ##
+      # Returns the classes and modules a constant referenced through
+      # +class_name+ may be defined in: +class_name+ itself, followed by its
+      # ancestors from the nearest to the furthest.
+      #
+      # Object is left out unless +class_name+ is Object itself.  Like Ruby,
+      # ri does not find a top-level constant through one of Object's
+      # subclasses: +String::ARGV+ is not +Object::ARGV+.
+
+      def constant_lookup_path(class_name)
+        # #ancestors_of returns the furthest ancestor first.
+        path = ancestors_of(class_name).reverse
+        path.delete 'Object' unless class_name == 'Object'
+        path.unshift class_name
+        path.uniq
+      end
+
+      ##
+      # Returns an RDoc::Store and RDoc::Constant pair for every constant
+      # defined directly on +class_name+, in every store documenting it.
+
+      def constants_of(class_name)
+        @constants[class_name] ||= (classes[class_name] || []).flat_map do |store|
+          begin
+            klass = store.load_class class_name
+          rescue ::RDoc::Store::MissingFileError
+            next []
+          end
+
+          klass.constants.map { |constant| [store, constant] }
+        end
+      end
+
+      ##
+      # Returns the RDoc::Store and RDoc::Constant pairs for +const_name+ as
+      # looked up from +class_name+.  The pairs come from the nearest class or
+      # module in the constant lookup path that defines +const_name+, one per
+      # store documenting it.  Returns an empty Array if there is no such
+      # constant.
+
+      def find_constants(class_name, const_name)
+        return [] unless classes.key? class_name
+
+        constant_lookup_path(class_name).each do |ancestor|
+          found = constants_of(ancestor).select do |_, constant|
+            constant.name == const_name
+          end
+
+          return found unless found.empty?
+        end
+
+        []
+      end
+
+      ##
+      # Returns the names of every constant that can be looked up through
+      # +class_name+.
+
+      def constant_names(class_name)
+        constant_lookup_path(class_name).flat_map { |ancestor|
+          constants_of(ancestor).map { |_, constant| constant.name }
+        }.uniq
+      end
+
+      ##
+      # Outputs formatted RI data for the class, constant or method +name+.
       #
       # Returns true if +name+ was found, false if it was not an alternative could
       # be guessed, raises an error if +name+ couldn't be guessed.
@@ -859,6 +951,8 @@ or the PAGER environment variable.
         end
 
         return true if display_class name
+
+        return true if display_constant name
 
         display_method name if name =~ /::|#|\./
 
@@ -969,7 +1063,7 @@ or the PAGER environment variable.
 
       def expand_class(klass)
         class_names = classes.keys
-        ary = class_names.grep(Regexp.new("\\A#{klass.gsub(/(?=::|\z)/, '[^:]*')}\\z"))
+        ary = class_names.grep(class_abbrev_regexp(klass))
         if ary.length != 1 && ary.first != klass
           if check_did_you_mean
             suggestion_proc = -> { DidYouMean::SpellChecker.new(dictionary: class_names).correct(klass) }
@@ -979,6 +1073,64 @@ or the PAGER environment variable.
           end
         end
         ary.first
+      end
+
+      ##
+      # Like #expand_class, but +klass+ may also be a constant reference
+      # (e.g. "Object::ARGV") whose class portion should be expanded while
+      # leaving the constant name as given.
+
+      def expand_class_or_constant(klass)
+        expand_class klass
+      rescue NotFoundError => e
+        class_name, const_name = split_constant_reference klass
+
+        raise e unless class_name
+
+        # An abbreviation of a known class wins over a constant of the same
+        # name, so that `ri Zl::Da` keeps meaning Zlib::DataError.
+        raise e if classes.keys.any?(class_abbrev_regexp(klass))
+
+        expanded = begin
+          expand_class class_name
+        rescue NotFoundError
+          raise e
+        end
+
+        raise constant_not_found_error(klass, expanded, const_name) if
+          find_constants(expanded, const_name).empty?
+
+        "#{expanded}::#{const_name}"
+      end
+
+      ##
+      # Returns a NotFoundError for +name+, a reference to the missing constant
+      # +const_name+ on the known class +class_name+.  Unlike #expand_class the
+      # suggestions are constants of +class_name+, not class names.
+
+      def constant_not_found_error(name, class_name, const_name) # :nodoc:
+        return NotFoundError.new(name) unless check_did_you_mean
+
+        suggestion_proc = -> {
+          spell_checker = DidYouMean::SpellChecker.new(dictionary: constant_names(class_name))
+          spell_checker.correct(const_name).map { |suggestion| "#{class_name}::#{suggestion}" }
+        }
+
+        NotFoundError.new(name, suggestion_proc)
+      end
+
+      def class_abbrev_regexp(class_name) # :nodoc:
+        # Examples:
+        #   "Zlib"   #=> /\AZlib[^:]*\z/
+        #   "Zl::Da" #=> /\AZl[^:]*::Da[^:]*\z/
+        #
+        # "Zl::Da" matches "Zlib::DataError", while "Zlib" does not.
+        pattern = class_name.gsub(/(?=::|\z)/, '[^:]*')
+        /\A#{pattern}\z/
+      end
+
+      def split_constant_reference(name) # :nodoc:
+        /\A(.+)::(\p{Upper}\p{Word}*)\z/.match(name)&.captures
       end
 
       ##
@@ -994,7 +1146,7 @@ or the PAGER environment variable.
         when ':'
           [find_store(klass),   selector, method]
         else
-          [expand_class(klass), selector, method]
+          [expand_class_or_constant(klass), selector, method]
         end.join
       end
 
@@ -1364,7 +1516,7 @@ or the PAGER environment variable.
           klass = parts.shift
           type  = parts.shift
           meth  = parts.join
-        elsif parts[-2] != '::' or parts.last !~ /^[A-Z]/
+        elsif parts[-2] != '::' or parts.last !~ /\A\p{Upper}/
           meth = parts.pop
           type = parts.pop
         end
@@ -1406,6 +1558,28 @@ or the PAGER environment variable.
         add_method_list out, attributes,       'Attributes'
 
         add_method_documentation out, klass if @show_all
+      end
+
+      ##
+      # Renders +constant+ from +store+ to +out+
+
+      def render_constant(out, store, constant) # :nodoc:
+        out << Markup::Paragraph.new("(from #{store.friendly_path})")
+
+        if alias_for = constant.is_alias_for
+          alias_name = ClassModule === alias_for ? alias_for.full_name : alias_for
+          out << Markup::Heading.new(3, "Alias for #{alias_name}")
+        end
+
+        out << Markup::Rule.new(1)
+
+        comment = constant.comment
+
+        if comment.empty?
+          out << Markup::Paragraph.new('[not documented]')
+        else
+          out << comment.parse
+        end
       end
 
       def render_method(out, store, method, name) # :nodoc:
